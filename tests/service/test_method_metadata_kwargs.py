@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import AsyncIterator
 from typing import Any
 
 import pytest
+import pytest_asyncio
 
 from dbus_fast import Message, MessageFlag, MessageType
 from dbus_fast.aio import MessageBus
@@ -15,6 +17,20 @@ from dbus_fast.service import (
     ServiceInterface,
     dbus_method,
 )
+
+
+@pytest_asyncio.fixture
+async def two_buses() -> AsyncIterator[tuple[MessageBus, MessageBus]]:
+    """Yield two connected asyncio :class:`MessageBus` instances."""
+    bus1 = await MessageBus().connect()
+    bus2 = await MessageBus().connect()
+    try:
+        yield bus1, bus2
+    finally:
+        bus1.disconnect()
+        bus2.disconnect()
+        await asyncio.wait_for(bus1.wait_for_disconnect(), timeout=1)
+        await asyncio.wait_for(bus2.wait_for_disconnect(), timeout=1)
 
 
 class MetadataInterface(ServiceInterface):
@@ -104,91 +120,76 @@ def test_all_known_metadata_names_recognized() -> None:
 
 
 @pytest.mark.asyncio
-async def test_sender_kwarg_receives_caller_unique_name() -> None:
-    bus1 = await MessageBus().connect()
-    bus2 = await MessageBus().connect()
-    try:
-        iface = MetadataInterface("test.metadata")
-        bus1.export("/test/path", iface)
+async def test_sender_kwarg_receives_caller_unique_name(
+    two_buses: tuple[MessageBus, MessageBus],
+) -> None:
+    bus1, bus2 = two_buses
+    iface = MetadataInterface("test.metadata")
+    bus1.export("/test/path", iface)
 
-        reply = await bus2.call(
-            Message(
-                destination=bus1.unique_name,
-                path="/test/path",
-                interface="test.metadata",
-                member="echo_sender",
-                signature="s",
-                body=["hi"],
-            )
+    reply = await bus2.call(
+        Message(
+            destination=bus1.unique_name,
+            path="/test/path",
+            interface="test.metadata",
+            member="echo_sender",
+            signature="s",
+            body=["hi"],
         )
-        assert reply.message_type == MessageType.METHOD_RETURN, reply.body[0]
-        assert reply.body == [bus2.unique_name]
-        assert iface.last_seen["sender"] == bus2.unique_name
-    finally:
-        bus1.disconnect()
-        bus2.disconnect()
-        await asyncio.wait_for(bus1.wait_for_disconnect(), timeout=1)
-        await asyncio.wait_for(bus2.wait_for_disconnect(), timeout=1)
+    )
+    assert reply.message_type == MessageType.METHOD_RETURN, reply.body[0]
+    assert reply.body == [bus2.unique_name]
+    assert iface.last_seen["sender"] == bus2.unique_name
 
 
 @pytest.mark.asyncio
-async def test_full_metadata_set_injected() -> None:
-    bus1 = await MessageBus().connect()
-    bus2 = await MessageBus().connect()
-    try:
-        iface = MetadataInterface("test.metadata")
-        bus1.export("/test/path", iface)
+async def test_full_metadata_set_injected(
+    two_buses: tuple[MessageBus, MessageBus],
+) -> None:
+    bus1, bus2 = two_buses
+    iface = MetadataInterface("test.metadata")
+    bus1.export("/test/path", iface)
 
-        reply = await bus2.call(
-            Message(
-                destination=bus1.unique_name,
-                path="/test/path",
-                interface="test.metadata",
-                member="collect_all",
-                signature="s",
-                body=["payload"],
-                flags=MessageFlag.NONE,
-            )
+    reply = await bus2.call(
+        Message(
+            destination=bus1.unique_name,
+            path="/test/path",
+            interface="test.metadata",
+            member="collect_all",
+            signature="s",
+            body=["payload"],
+            flags=MessageFlag.NONE,
         )
-        assert reply.message_type == MessageType.METHOD_RETURN, reply.body[0]
-        seen = iface.last_seen
-        assert seen["sender"] == bus2.unique_name
-        assert seen["destination"] == bus1.unique_name
-        assert seen["path"] == "/test/path"
-        assert seen["interface"] == "test.metadata"
-        assert isinstance(seen["flags"], MessageFlag)
-        assert seen["unix_fds"] == []
-        assert isinstance(seen["message"], Message)
-        assert seen["message"].member == "collect_all"
-    finally:
-        bus1.disconnect()
-        bus2.disconnect()
-        await asyncio.wait_for(bus1.wait_for_disconnect(), timeout=1)
-        await asyncio.wait_for(bus2.wait_for_disconnect(), timeout=1)
+    )
+    assert reply.message_type == MessageType.METHOD_RETURN, reply.body[0]
+    seen = iface.last_seen
+    assert seen["sender"] == bus2.unique_name
+    assert seen["destination"] == bus1.unique_name
+    assert seen["path"] == "/test/path"
+    assert seen["interface"] == "test.metadata"
+    assert isinstance(seen["flags"], MessageFlag)
+    assert seen["unix_fds"] == []
+    assert isinstance(seen["message"], Message)
+    assert seen["message"].member == "collect_all"
 
 
 @pytest.mark.asyncio
-async def test_method_without_metadata_still_works() -> None:
-    bus1 = await MessageBus().connect()
-    bus2 = await MessageBus().connect()
-    try:
-        iface = MetadataInterface("test.metadata")
-        bus1.export("/test/path", iface)
+async def test_method_without_metadata_still_works(
+    two_buses: tuple[MessageBus, MessageBus],
+) -> None:
+    bus1, bus2 = two_buses
+    iface = MetadataInterface("test.metadata")
+    bus1.export("/test/path", iface)
 
-        reply = await bus2.call(
-            Message(
-                destination=bus1.unique_name,
-                path="/test/path",
-                interface="test.metadata",
-                member="no_metadata",
-                signature="s",
-                body=["plain"],
-            )
+    reply = await bus2.call(
+        Message(
+            destination=bus1.unique_name,
+            path="/test/path",
+            interface="test.metadata",
+            member="no_metadata",
+            signature="s",
+            body=["plain"],
         )
-        assert reply.message_type == MessageType.METHOD_RETURN, reply.body[0]
-        assert reply.body == ["plain"]
-    finally:
-        bus1.disconnect()
-        bus2.disconnect()
-        await asyncio.wait_for(bus1.wait_for_disconnect(), timeout=1)
-        await asyncio.wait_for(bus2.wait_for_disconnect(), timeout=1)
+    )
+    assert reply.message_type == MessageType.METHOD_RETURN, reply.body[0]
+    assert reply.body == ["plain"]
