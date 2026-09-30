@@ -1,4 +1,5 @@
 import hashlib
+import threading
 import xml.etree.ElementTree as ET
 import xml.parsers.expat as _expat
 
@@ -499,20 +500,35 @@ class Interface:
 _SHARED_INTERFACES: dict[tuple[bytes, bool], Interface] = {}
 _PARSED_NODES: dict[tuple[bytes, bool], "Node"] = {}
 _SHARED_INTERFACES_MAX = 256
+# Larger documents are parsed but not cached, so a peer answering Introspect
+# with huge XML can't pin that memory for the life of the process.
+_SHARED_XML_MAX_BYTES = 65_536
+_CACHE_LOCK = threading.Lock()
+
+
+def _bounded_put(cache: dict, key: object, value: object, max_size: int) -> None:
+    """Insert ``value``, evicting the oldest entry once ``max_size`` is reached."""
+    with _CACHE_LOCK:
+        if len(cache) >= max_size:
+            del cache[next(iter(cache))]
+        cache[key] = value
 
 
 def _interface_from_xml_shared(
     element: ET.Element, validate_property_names: bool
 ) -> Interface:
-    key = (hashlib.sha256(ET.tostring(element)).digest(), validate_property_names)
+    xml = ET.tostring(element)
+    if len(xml) > _SHARED_XML_MAX_BYTES:
+        return Interface.from_xml(
+            element, validate_property_names=validate_property_names
+        )
+    key = (hashlib.sha256(xml).digest(), validate_property_names)
     interface = _SHARED_INTERFACES.get(key)
     if interface is None:
         interface = Interface.from_xml(
             element, validate_property_names=validate_property_names
         )
-        if len(_SHARED_INTERFACES) >= _SHARED_INTERFACES_MAX:
-            del _SHARED_INTERFACES[next(iter(_SHARED_INTERFACES))]
-        _SHARED_INTERFACES[key] = interface
+        _bounded_put(_SHARED_INTERFACES, key, interface, _SHARED_INTERFACES_MAX)
     return interface
 
 
@@ -629,10 +645,12 @@ class Node:
         :raises:
             - :class:`InvalidIntrospectionError <dbus_fast.InvalidIntrospectionError>` - If the string is not valid introspection data.
         """
-        key = (hashlib.sha256(data.encode()).digest(), validate_property_names)
-        template = _PARSED_NODES.get(key)
+        raw = data.encode() if isinstance(data, str) else data
+        cacheable = len(raw) <= _SHARED_XML_MAX_BYTES
+        key = (hashlib.sha256(raw).digest(), validate_property_names)
+        template = _PARSED_NODES.get(key) if cacheable else None
         if template is None:
-            element = _parse_introspection_xml(data)
+            element = _parse_introspection_xml(raw)
             if element.tag != "node":
                 raise InvalidIntrospectionError(
                     'introspection data must have a "node" for the root element'
@@ -640,9 +658,9 @@ class Node:
             template = Node.from_xml(
                 element, is_root=True, validate_property_names=validate_property_names
             )
-            if len(_PARSED_NODES) >= _SHARED_INTERFACES_MAX:
-                del _PARSED_NODES[next(iter(_PARSED_NODES))]
-            _PARSED_NODES[key] = template
+            if not cacheable:
+                return template
+            _bounded_put(_PARSED_NODES, key, template, _SHARED_INTERFACES_MAX)
 
         return template._copy()
 
