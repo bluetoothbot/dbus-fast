@@ -1,6 +1,8 @@
 """Proxy interfaces that share their members through a per-interface class."""
 
 import inspect
+import sys
+import threading
 from unittest.mock import patch
 
 import pytest
@@ -273,3 +275,34 @@ async def test_shared_class_cache_is_bounded(monkeypatch: pytest.MonkeyPatch) ->
     assert type(again) is not type(first)
     assert await again.call_echo("y") == "y"
     assert len(proxy_object._SHARED_PROXY_CLASSES) == 2
+
+
+async def test_race_shared_proxy_class_eviction_from_threads(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Concurrent class builds past the cache bound never raise from eviction."""
+    monkeypatch.setattr(proxy_object, "_SHARED_PROXY_CLASSES_MAX", 4)
+    monkeypatch.setattr(proxy_object, "_SHARED_PROXY_CLASSES", {})
+    errors: list[BaseException] = []
+
+    def worker(tid: int) -> None:
+        for i in range(500):
+            iface = intr.Interface(
+                "org.example.I", methods=[intr.Method(f"M{tid}x{i}")]
+            )
+            try:
+                proxy_object._shared_proxy_class(ProxyInterface, iface)
+            except Exception as ex:
+                errors.append(ex)
+
+    interval = sys.getswitchinterval()
+    sys.setswitchinterval(1e-6)
+    try:
+        threads = [threading.Thread(target=worker, args=(t,)) for t in range(8)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+    finally:
+        sys.setswitchinterval(interval)
+    assert errors == []

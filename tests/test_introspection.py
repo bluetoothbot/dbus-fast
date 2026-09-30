@@ -1,4 +1,6 @@
 import os
+import sys
+import threading
 import xml.etree.ElementTree as ET
 
 import pytest
@@ -439,3 +441,53 @@ def test_introspection_parse_sharing_respects_validation_flag() -> None:
     intr.Node.parse(sloppy_data, validate_property_names=False)
     with pytest.raises(InvalidMemberNameError, match="invalid member name"):
         intr.Node.parse(sloppy_data)
+
+
+def test_introspection_parse_accepts_bytes() -> None:
+    """Node.parse accepts bytes as well as str."""
+    node = intr.Node.parse(strict_data.encode())
+    assert len(node.interfaces) == 1
+
+
+def test_race_introspection_parse_cache_eviction_from_threads(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Concurrent parses past the cache bound never raise from eviction."""
+    monkeypatch.setattr(intr, "_SHARED_INTERFACES_MAX", 4)
+    monkeypatch.setattr(intr, "_SHARED_INTERFACES", {})
+    monkeypatch.setattr(intr, "_PARSED_NODES", {})
+    errors: list[BaseException] = []
+
+    def worker(tid: int) -> None:
+        for i in range(500):
+            try:
+                intr.Node.parse(
+                    f'<node><interface name="t{tid}.i{i}"><method name="M"/>'
+                    "</interface></node>"
+                )
+            except Exception as ex:
+                errors.append(ex)
+
+    interval = sys.getswitchinterval()
+    sys.setswitchinterval(1e-6)
+    try:
+        threads = [threading.Thread(target=worker, args=(t,)) for t in range(8)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+    finally:
+        sys.setswitchinterval(interval)
+    assert errors == []
+
+
+def test_dos_introspection_parse_does_not_retain_oversized_documents() -> None:
+    """Documents over the cache size limit are parsed but not retained."""
+    props = "".join(
+        f'<property name="P{i}" type="s" access="read"/>' for i in range(5000)
+    )
+    data = f'<node><interface name="org.example.Big">{props}</interface></node>'
+    first = intr.Node.parse(data)
+    second = intr.Node.parse(data)
+    assert len(first.interfaces[0].properties) == 5000
+    assert first.interfaces[0] is not second.interfaces[0]
